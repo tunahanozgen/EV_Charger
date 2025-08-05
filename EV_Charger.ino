@@ -13,8 +13,10 @@
 
 
 /////////// PILOT PWM sabitleri
-const float maxCurrent = 32.0;  //A
-float desiredCurrent = 16.0;    
+float maxCurrent = 32.0;  //A
+float desiredCurrent = 6.0; 
+float oldDesiredCurrent = 0; 
+
 ////////////////
 
 ///NTC sabitleri
@@ -26,18 +28,54 @@ const float BETA = 3950;    // NTC'nin beta değeri
 const float T0 = 298.15;    // 25°C in Kelvin
 const float R0 = 10000;     // 25°C'deki direnç (ohm)
 // Temperature veriables
-float internalTemperature = 0.0;
+float internalTemperature = 0.0; // kart sıcaklığı
+float externalTemperature = 0.0; // araç şarj fişi sıcaklığı
+unsigned long lastTemperatureReadMillis = millis();
+#define TEMP_SENS_INTERVAL  1000
 /////////////////
 
 
 void setup() {
   Serial.begin(115200);
-  setTimer();
-  setChargingCurrent(desiredCurrent); // akımı ayarla
+  Serial.println("--EV Charger DEMO--");
+  setTimer(); // 1khz frekans ayarlama işlemi
+  
+  pinMode(PILOT_PWM_MCU_READ_PIN, INPUT);
+  pinMode(PP_MCU_READ_PIN, INPUT);
+
+
+  maxCurrent = readPPCableCurrent(); // read max current?
+  Serial.println("Kablo akım kapasitesi: " + String(maxCurrent));
+
+  //for debug
+  if(maxCurrent < 32) maxCurrent = 32;
 }
 
 void loop() {
-  internalTemperature = readthermistor(INTERNAL_NTC_PIN);
+  
+  if(millis() - lastTemperatureReadMillis > TEMP_SENS_INTERVAL){
+    internalTemperature = readthermistor(INTERNAL_NTC_PIN);
+    externalTemperature = readthermistor(EXTERNAL_NTC_PIN);
+    //Serial.println("T_internal: " + String(internalTemperature) + " | T_external: " + String(externalTemperature));
+    readPilotPWM();
+    lastTemperatureReadMillis = millis();
+  }
+  
+  if(desiredCurrent != oldDesiredCurrent){
+    setChargingCurrent(desiredCurrent); // akımı ayarla
+    oldDesiredCurrent = desiredCurrent; // eski ve güncel akımı eşitliyoruz
+  }
+  
+
+  while(Serial.available()){
+    String cmd = Serial.readStringUntil('#');
+    String key = split(cmd,'=',0);
+    String value = split(cmd,'=',1);
+  
+    if(key == "current") desiredCurrent = value.toInt();
+
+    Serial.println("desiredCurrent: " + String(desiredCurrent) + " oldDesiredCurrent: " + String(oldDesiredCurrent));
+  }
 }
 
 float readthermistor(byte thermistor_pin){
@@ -86,4 +124,54 @@ void setChargingCurrent(float currentA) {
   Serial.print(" A, PWM: ");
   Serial.print(dutyPercent);
   Serial.println(" %");
+}
+String split(const String &data, char separator, int index) {
+  int start = 0;
+  int end = -1;
+  int found = 0;
+
+  int len = data.length();
+  for (int i = 0; i <= len; i++) {
+    if (data[i] == separator || i == len) {
+      if (found == index) {
+        return data.substring(start, i);  // direkt döndür, diğerlerine bakma
+      }
+      found++;
+      start = i + 1;
+    }
+  }
+
+  return "";
+}
+void readPilotPWM(){
+  unsigned long lowTime  = pulseIn(PILOT_PWM_MCU_READ_PIN, LOW, 20000);
+  unsigned long highTime = pulseIn(PILOT_PWM_MCU_READ_PIN, HIGH, 20000);
+
+  if (highTime == 0 || lowTime == 0) {
+    Serial.println("PWM sinyali yok.");
+    return;
+  }
+
+  unsigned long period = highTime + lowTime;
+  float duty = (highTime * 100.0) / period;
+
+  Serial.print("Duty: ");
+  Serial.print(duty);
+  Serial.println(" %");
+
+
+}
+float readPPCableCurrent() {
+  int adcValue = analogRead(PP_MCU_READ_PIN);
+  float voltage = (adcValue / (float)adcMax) * Vcc;
+
+  // Karar aralıkları: Voltaj değerine göre karşılık gelen kablo akımı
+  
+  // Kablo takılı değilse — neredeyse 5V okunur
+  if (voltage > 4.85) return 0.0;       // PP hattı boşta, kablo takılı değil
+  else if (voltage > 4.70) return 63.0;
+  else if (voltage > 4.55) return 32.0;
+  else if (voltage > 4.35) return 20.0;
+  else if (voltage > 4.10) return 13.0;
+  else return 6.0; // Örn: 330Ω gibi özel direnç varsa (opsiyonel senaryo)
 }
